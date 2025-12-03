@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader, Dataset
 import numpy as np
 from tqdm import tqdm
 from sklearn import metrics
-from datasets import load_dataset, concatenate_datasets
+from datasets import load_dataset
 from transformers import (
     DistilBertForSequenceClassification,
     AutoTokenizer,
@@ -36,8 +36,9 @@ print(f"사용 디바이스: {device}")
 # 커스텀 Dataset 클래스
 # =====================================
 class IMDbDataset(Dataset):
-    def __init__(self, encodings, labels):
-        self.encodings = encodings
+    def __init__(self, input_ids, attention_mask, labels):
+        self.input_ids = input_ids
+        self.attention_mask = attention_mask
         self.labels = labels
     
     def __len__(self):
@@ -45,9 +46,9 @@ class IMDbDataset(Dataset):
     
     def __getitem__(self, idx):
         return {
-            'input_ids': torch.tensor(self.encodings['input_ids'][idx]),
-            'attention_mask': torch.tensor(self.encodings['attention_mask'][idx]),
-            'labels': torch.tensor(self.labels[idx])
+            'input_ids': self.input_ids[idx],
+            'attention_mask': self.attention_mask[idx],
+            'labels': self.labels[idx]
         }
 
 def collate_fn(batch):
@@ -73,11 +74,8 @@ print(f"전체 훈련 샘플 수: {len(train_full)}, 전체 테스트 샘플 수
 # =====================================
 print("\n[Step 2] 데이터셋 분할 중...")
 
-# A1 (멤버 학습), A2 (멤버 테스트용)
 train_A1 = train_full.select(range(12500))
 train_A2 = train_full.select(range(12500, 25000))
-
-# B1, B2, B3: 테스트셋 분할
 test_B1 = test_full.select(range(6250))
 test_B2 = test_full.select(range(6250, 12500))
 test_B3 = test_full.select(range(12500, 25000))
@@ -91,29 +89,30 @@ print(f"B1 (새도우 학습): {len(test_B1)}, B2 (새도우 비멤버): {len(te
 print("\n[Step 3] 토큰화 중...")
 tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 
-def tokenize_data(dataset):
-    """데이터셋 토큰화"""
-    texts = list(dataset['text'])  # 리스트로 변환
-    labels = list(dataset['label'])  # 리스트로 변환
-    encodings = tokenizer(texts, truncation=True, padding='max_length', max_length=128)
-    return encodings, labels
+def create_dataset(hf_dataset):
+    """HuggingFace 데이터셋을 PyTorch Dataset으로 변환"""
+    texts = list(hf_dataset['text'])
+    labels = list(hf_dataset['label'])
+    
+    encodings = tokenizer(texts, truncation=True, padding='max_length', max_length=128, return_tensors='pt')
+    
+    return IMDbDataset(
+        input_ids=encodings['input_ids'],
+        attention_mask=encodings['attention_mask'],
+        labels=torch.tensor(labels, dtype=torch.long)
+    )
 
-# 각 데이터셋 토큰화
 print("  토큰화 진행 중...")
-enc_A1, lab_A1 = tokenize_data(train_A1)
-enc_A2, lab_A2 = tokenize_data(train_A2)
-enc_B1, lab_B1 = tokenize_data(test_B1)
-enc_B2, lab_B2 = tokenize_data(test_B2)
-enc_B3, lab_B3 = tokenize_data(test_B3)
-
-# Dataset 객체 생성
-dataset_A1 = IMDbDataset(enc_A1, lab_A1)
-dataset_A2 = IMDbDataset(enc_A2, lab_A2)
-dataset_B1 = IMDbDataset(enc_B1, lab_B1)
-dataset_B2 = IMDbDataset(enc_B2, lab_B2)
-dataset_B3 = IMDbDataset(enc_B3, lab_B3)
+dataset_A1 = create_dataset(train_A1)
+dataset_A2 = create_dataset(train_A2)
+dataset_B1 = create_dataset(test_B1)
+dataset_B2 = create_dataset(test_B2)
+dataset_B3 = create_dataset(test_B3)
 
 print(f"  A1: {len(dataset_A1)}, A2: {len(dataset_A2)}, B1: {len(dataset_B1)}, B2: {len(dataset_B2)}, B3: {len(dataset_B3)}")
+
+# 라벨 분포 확인
+print(f"  [디버그] A1 라벨 분포: 0={sum(1 for l in dataset_A1.labels if l==0)}, 1={sum(1 for l in dataset_A1.labels if l==1)}")
 
 # =====================================
 # 5. Dataloader 준비
@@ -121,7 +120,6 @@ print(f"  A1: {len(dataset_A1)}, A2: {len(dataset_A2)}, B1: {len(dataset_B1)}, B
 print("\n[Step 4] Dataloader 준비 중...")
 batch_size = 16
 
-# drop_last=True로 배치 크기 일관성 유지 (Opacus 호환)
 train_loader_A1 = DataLoader(dataset_A1, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, drop_last=True)
 eval_loader_A2 = DataLoader(dataset_A2, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
 eval_loader_B3 = DataLoader(dataset_B3, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
@@ -150,6 +148,9 @@ epochs = 1
 model.train()
 for epoch in range(epochs):
     total_loss = 0
+    correct_train = 0
+    total_train = 0
+    
     for batch in tqdm(train_loader_A1, desc=f"Training Epoch {epoch+1}"):
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
@@ -161,9 +162,15 @@ for epoch in range(epochs):
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
+        
+        # 학습 중 정확도 계산
+        preds = outputs.logits.argmax(dim=1)
+        correct_train += (preds == labels).sum().item()
+        total_train += labels.size(0)
     
     avg_loss = total_loss / len(train_loader_A1)
-    print(f"Epoch {epoch+1} 완료 - 평균 손실: {avg_loss:.4f}")
+    train_acc = correct_train / total_train
+    print(f"Epoch {epoch+1} 완료 - 평균 손실: {avg_loss:.4f}, 학습 정확도: {train_acc:.4f}")
 
 # 타겟 모델 평가
 model.eval()
@@ -211,7 +218,6 @@ shadow_model = DistilBertForSequenceClassification.from_pretrained(
 ).to(device)
 shadow_optimizer = optim.AdamW(shadow_model.parameters(), lr=2e-5)
 
-# 새도우 모델 학습
 print("\n새도우 모델 학습 중...")
 shadow_model.train()
 for epoch in range(1):
@@ -341,9 +347,9 @@ model_dp = ModuleValidator.fix(model_dp)
 model_dp.to(device)
 model_dp.train()
 
-optimizer_dp = optim.AdamW(model_dp.parameters(), lr=2e-5)
+optimizer_dp = optim.SGD(model_dp.parameters(), lr=0.001)  # SGD 사용 (Opacus 권장)
 
-# DP용 DataLoader (drop_last=True 필수)
+# DP용 DataLoader
 train_loader_A1_dp = DataLoader(dataset_A1, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, drop_last=True)
 
 # PrivacyEngine 설정
@@ -357,7 +363,8 @@ model_dp, optimizer_dp, train_loader_A1_dp = privacy_engine.make_private(
     data_loader=train_loader_A1_dp,
     noise_multiplier=noise_multiplier,
     max_grad_norm=max_grad_norm,
-    poisson_sampling=False  # 중요: False로 설정해야 배치 크기 일관성 유지
+    poisson_sampling=False,
+    grad_sample_mode="hooks"  # 또는 "functorch"
 )
 
 # 학습 루프 (w/ DP)
@@ -432,7 +439,7 @@ shadow_model_dp = ModuleValidator.fix(shadow_model_dp)
 shadow_model_dp.to(device)
 shadow_model_dp.train()
 
-shadow_optimizer_dp = optim.AdamW(shadow_model_dp.parameters(), lr=2e-5)
+shadow_optimizer_dp = optim.SGD(shadow_model_dp.parameters(), lr=0.001)
 
 train_loader_B1_dp = DataLoader(dataset_B1, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, drop_last=True)
 
@@ -443,7 +450,8 @@ shadow_model_dp, shadow_optimizer_dp, train_loader_B1_dp = privacy_engine_shadow
     data_loader=train_loader_B1_dp,
     noise_multiplier=noise_multiplier,
     max_grad_norm=max_grad_norm,
-    poisson_sampling=False
+    poisson_sampling=False,
+    grad_sample_mode="hooks"
 )
 
 print("\n[DP] 새도우 모델 학습 중...")
@@ -566,14 +574,13 @@ print("분석 결론:")
 print("="*60)
 
 if simple_auc_dp < simple_auc_no_dp:
-    improvement = ((simple_auc_no_dp - simple_auc_dp) / (simple_auc_no_dp - 0.5)) * 100 if simple_auc_no_dp > 0.5 else 0
     print(f"✓ DP-SGD 적용으로 SimpleConf MIA AUC가 {simple_auc_no_dp:.4f} → {simple_auc_dp:.4f}로 감소")
     print(f"  프라이버시가 향상됨 (0.5에 가까울수록 랜덤 추측 수준)")
 else:
     print("✗ DP-SGD 적용 후에도 MIA AUC가 감소하지 않음")
 
 if acc_target_dp < acc_target_no_dp:
-    acc_drop = ((acc_target_no_dp - acc_target_dp) / acc_target_no_dp) * 100
+    acc_drop = ((acc_target_no_dp - acc_target_dp) / acc_target_no_dp) * 100 if acc_target_no_dp > 0 else 0
     print(f"! 단, 모델 정확도가 {acc_target_no_dp:.4f} → {acc_target_dp:.4f}로 {acc_drop:.1f}% 하락")
     print(f"  (privacy-utility trade-off)")
 else:
