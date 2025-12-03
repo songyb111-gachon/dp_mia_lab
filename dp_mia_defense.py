@@ -375,7 +375,8 @@ model_dp, optimizer_dp, train_A_loader_dp = privacy_engine.make_private(
     optimizer=optimizer_dp,
     data_loader=train_loader_A1_dp,
     noise_multiplier=noise_multiplier,
-    max_grad_norm=max_grad_norm
+    max_grad_norm=max_grad_norm,
+    grad_sample_mode="functorch"  # DistilBERT 호환!
 )
 
 # 학습 루프 (w/ DP)
@@ -460,7 +461,8 @@ shadow_model_dp, shadow_optimizer_dp, train_B1_loader_dp = privacy_engine_shadow
     optimizer=shadow_optimizer_dp,
     data_loader=train_loader_B1_dp,
     noise_multiplier=noise_multiplier,
-    max_grad_norm=max_grad_norm
+    max_grad_norm=max_grad_norm,
+    grad_sample_mode="functorch"  # DistilBERT 호환!
 )
 
 print("\n[DP] 새도우 모델 학습 중...")
