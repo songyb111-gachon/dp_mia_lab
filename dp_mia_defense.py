@@ -176,10 +176,18 @@ for epoch in range(epochs):
 # 타겟 모델 평가 (분류 정확도)
 model.eval()
 correct, total = 0, 0
+first_batch = True
 with torch.no_grad():
     for batch in eval_loader_A2:
         inputs = {k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask"]}
         labels = batch["labels"].to(device)
+        
+        # 디버깅: 첫 배치의 라벨 확인
+        if first_batch:
+            print(f"[디버그] 평가 배치 키: {batch.keys()}")
+            print(f"[디버그] 라벨 샘플: {labels[:5]}")
+            first_batch = False
+        
         outputs = model(**inputs)
         preds = outputs.logits.argmax(dim=1)
         correct += (preds == labels).sum().item()
@@ -359,6 +367,7 @@ model_dp = DistilBertForSequenceClassification.from_pretrained(
 # Opacus 호환성을 위해 모델 수정 (LayerNorm 등)
 model_dp = ModuleValidator.fix(model_dp)
 model_dp.to(device)
+model_dp.train()  # 중요: Opacus는 training mode 필수!
 
 optimizer_dp = optim.AdamW(model_dp.parameters(), lr=2e-5)
 
@@ -446,6 +455,7 @@ shadow_model_dp = DistilBertForSequenceClassification.from_pretrained(
 # Opacus 호환성을 위해 모델 수정
 shadow_model_dp = ModuleValidator.fix(shadow_model_dp)
 shadow_model_dp.to(device)
+shadow_model_dp.train()  # 중요: Opacus는 training mode 필수!
 
 shadow_optimizer_dp = optim.AdamW(shadow_model_dp.parameters(), lr=2e-5)
 
