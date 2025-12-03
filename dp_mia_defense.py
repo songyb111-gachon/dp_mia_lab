@@ -372,7 +372,7 @@ optimizer_dp = optim.AdamW(
 )
 
 # DP 설정
-noise_multiplier = 1.0
+noise_multiplier = 0.5  # 0.5로 낮춰서 정확도 향상 (ε 증가)
 max_grad_norm = 1.0
 
 # DP용 DataLoader
@@ -389,7 +389,7 @@ model_dp, optimizer_dp, train_A_loader_dp = privacy_engine.make_private(
 )
 
 # 학습 루프 (w/ DP)
-epochs_dp = 1
+epochs_dp = 5  # 더 많이 학습하여 정확도 향상
 delta = 1e-5
 
 for epoch in range(epochs_dp):
