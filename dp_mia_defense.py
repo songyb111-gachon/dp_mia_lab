@@ -93,8 +93,8 @@ tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 
 def tokenize_data(dataset):
     """데이터셋 토큰화"""
-    texts = dataset['text']
-    labels = dataset['label']
+    texts = list(dataset['text'])  # 리스트로 변환
+    labels = list(dataset['label'])  # 리스트로 변환
     encodings = tokenizer(texts, truncation=True, padding='max_length', max_length=128)
     return encodings, labels
 
