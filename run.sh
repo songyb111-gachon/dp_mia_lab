@@ -7,22 +7,13 @@ echo "DP로 MIA 방어하기 실습"
 echo "======================================================"
 echo ""
 
-# 가상환경 생성 및 활성화 (선택사항)
-if [ ! -d "venv" ]; then
-    echo "[1/3] 가상환경 생성 중..."
-    python3 -m venv venv
-fi
-
-echo "[1/3] 가상환경 활성화 중..."
-source venv/bin/activate
-
-# 필요한 패키지 설치
-echo "[2/3] 필요한 패키지 설치 중..."
-pip install -q -r requirements.txt
+# 필요한 패키지 설치 (conda 환경 사용 가정)
+echo "[1/2] 필요한 패키지 확인 중..."
+pip install -q opacus tqdm datasets transformers scikit-learn
 
 # 실험 실행
 echo ""
-echo "[3/3] 실험 실행 중..."
+echo "[2/2] 실험 실행 중..."
 echo ""
 python3 dp_mia_defense.py
 
@@ -30,4 +21,3 @@ echo ""
 echo "======================================================"
 echo "실험 완료!"
 echo "======================================================"
-

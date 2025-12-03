@@ -23,6 +23,7 @@ from transformers import (
     DataCollatorWithPadding
 )
 from opacus import PrivacyEngine
+from opacus.validators import ModuleValidator
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -94,7 +95,9 @@ datasets_to_tokenize = {
 tokenized_datasets = {}
 for name, ds in datasets_to_tokenize.items():
     ds_tok = ds.map(tokenize_batch, batched=True, remove_columns=["text"])
-    ds_tok.set_format(type="torch", columns=["input_ids", "attention_mask", "label"])
+    # "label" 컬럼을 "labels"로 이름 변경 (HuggingFace 호환)
+    ds_tok = ds_tok.rename_column("label", "labels")
+    ds_tok.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
     tokenized_datasets[name] = ds_tok
     print(f"  {name}: {len(ds_tok)} 샘플")
 
@@ -127,6 +130,18 @@ mia_eval_loader = DataLoader(mia_eval_tok, batch_size=batch_size, shuffle=False,
 print(f"배치 사이즈: {batch_size}")
 
 # =====================================
+# 헬퍼 함수: 라벨 추출
+# =====================================
+def get_labels(batch):
+    """배치에서 라벨 추출 (labels 또는 label 키 지원)"""
+    if "labels" in batch:
+        return batch["labels"]
+    elif "label" in batch:
+        return batch["label"]
+    else:
+        raise KeyError("No labels found in batch")
+
+# =====================================
 # 6. DistilBERT 파인튜닝 (w/o DP) - 타겟 모델
 # =====================================
 print("\n" + "="*60)
@@ -151,7 +166,7 @@ for epoch in range(epochs):
     total_loss = 0
     for batch in tqdm(train_loader_A1, desc=f"Training Epoch {epoch+1}"):
         inputs = {k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask"]}
-        labels = batch["labels"].to(device)
+        labels = get_labels(batch).to(device)
         
         optimizer.zero_grad()
         outputs = model(**inputs, labels=labels)
@@ -169,7 +184,7 @@ correct, total = 0, 0
 with torch.no_grad():
     for batch in eval_loader_A2:
         inputs = {k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask"]}
-        labels = batch["labels"].to(device)
+        labels = get_labels(batch).to(device)
         outputs = model(**inputs)
         preds = outputs.logits.argmax(dim=1)
         correct += (preds == labels).sum().item()
@@ -183,7 +198,7 @@ correct, total = 0, 0
 with torch.no_grad():
     for batch in eval_loader_B3:
         inputs = {k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask"]}
-        labels = batch["labels"].to(device)
+        labels = get_labels(batch).to(device)
         outputs = model(**inputs)
         preds = outputs.logits.argmax(dim=1)
         correct += (preds == labels).sum().item()
@@ -212,7 +227,7 @@ print("\n새도우 모델 학습 중...")
 for epoch in range(1):  # 필요시 epoch 조절
     for batch in tqdm(train_loader_B1, desc="Shadow Model Training"):
         inputs = {k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask"]}
-        labels = batch["labels"].to(device)
+        labels = get_labels(batch).to(device)
         outputs = shadow_model(**inputs, labels=labels)
         loss = outputs.loss
         shadow_optimizer.zero_grad()
@@ -225,7 +240,6 @@ shadow_model.eval()
 member_features = []
 for batch in train_loader_B1:
     inputs = {k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask"]}
-    labels = batch["labels"].to(device)
     with torch.no_grad():
         outputs = shadow_model(**inputs)
         probs = torch.softmax(outputs.logits, dim=1)  # 예측 확률분포
@@ -341,6 +355,14 @@ model_dp = DistilBertForSequenceClassification.from_pretrained(
     "distilbert-base-uncased",
     num_labels=2
 ).to(device)
+
+# Opacus 호환성을 위해 모델 수정 (LayerNorm 등)
+model_dp = ModuleValidator.fix(model_dp)
+model_dp.to(device)
+
+# 반드시 train 모드로 설정! (Opacus 필수)
+model_dp.train()
+
 optimizer_dp = optim.AdamW(model_dp.parameters(), lr=2e-5)
 
 # PrivacyEngine 설정 및 부착
@@ -362,18 +384,21 @@ delta = 1e-5    # delta (데이터셋의 크기에 따라 1e-5 혹은 1e-6 자�
 
 for epoch in range(epochs_dp):
     model_dp.train()
+    total_loss = 0
     for batch in tqdm(train_A_loader_dp, desc=f"DP Training Epoch {epoch+1}"):
         inputs = {k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask"]}
-        labels = batch["labels"].to(device)
+        labels = get_labels(batch).to(device)
         optimizer_dp.zero_grad()
         outputs = model_dp(**inputs, labels=labels)
         loss = outputs.loss
         loss.backward()
         optimizer_dp.step()
+        total_loss += loss.item()
     
+    avg_loss = total_loss / len(train_A_loader_dp)
     # Epoch 종료 후 누적 (ε) 계산
     epsilon = privacy_engine.get_epsilon(delta=delta)
-    print(f"Epoch {epoch+1} DP-SGD 완료 - Privacy budget ε = {epsilon:.2f} (δ={delta})")
+    print(f"Epoch {epoch+1} DP-SGD 완료 - 평균 손실: {avg_loss:.4f}, Privacy budget ε = {epsilon:.2f} (δ={delta})")
 
 # DP 타겟 모델 평가 (분류 정확도)
 model_dp.eval()
@@ -381,7 +406,7 @@ correct, total = 0, 0
 with torch.no_grad():
     for batch in eval_loader_A2:
         inputs = {k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask"]}
-        labels = batch["labels"].to(device)
+        labels = get_labels(batch).to(device)
         outputs = model_dp(**inputs)
         preds = outputs.logits.argmax(dim=1)
         correct += (preds == labels).sum().item()
@@ -395,7 +420,7 @@ correct, total = 0, 0
 with torch.no_grad():
     for batch in eval_loader_B3:
         inputs = {k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask"]}
-        labels = batch["labels"].to(device)
+        labels = get_labels(batch).to(device)
         outputs = model_dp(**inputs)
         preds = outputs.logits.argmax(dim=1)
         correct += (preds == labels).sum().item()
@@ -416,6 +441,12 @@ shadow_model_dp = DistilBertForSequenceClassification.from_pretrained(
     "distilbert-base-uncased",
     num_labels=2
 ).to(device)
+
+# Opacus 호환성을 위해 모델 수정
+shadow_model_dp = ModuleValidator.fix(shadow_model_dp)
+shadow_model_dp.to(device)
+shadow_model_dp.train()
+
 shadow_optimizer_dp = optim.AdamW(shadow_model_dp.parameters(), lr=2e-5)
 
 privacy_engine_shadow = PrivacyEngine()
@@ -429,10 +460,11 @@ shadow_model_dp, shadow_optimizer_dp, train_B1_loader_dp = privacy_engine_shadow
 
 # 새도우 모델 DP-SGD 학습 (간략히 1 epoch)
 print("\n[DP] 새도우 모델 학습 중...")
+shadow_model_dp.train()
 for batch in tqdm(train_B1_loader_dp, desc="Shadow Model (DP) Training"):
     shadow_optimizer_dp.zero_grad()
     inputs = {k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask"]}
-    labels = batch["labels"].to(device)
+    labels = get_labels(batch).to(device)
     outputs = shadow_model_dp(**inputs, labels=labels)
     loss = outputs.loss
     loss.backward()
@@ -445,12 +477,14 @@ nonmember_feat_dp = []
 
 with torch.no_grad():
     for batch in train_loader_B1:
-        outputs = shadow_model_dp(**{k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask"]})
+        inputs = {k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask"]}
+        outputs = shadow_model_dp(**inputs)
         probs = torch.softmax(outputs.logits, dim=1)
         member_feat_dp.extend(probs.cpu().tolist())
     
     for batch in eval_loader_B2:
-        outputs = shadow_model_dp(**{k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask"]})
+        inputs = {k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask"]}
+        outputs = shadow_model_dp(**inputs)
         probs = torch.softmax(outputs.logits, dim=1)
         nonmember_feat_dp.extend(probs.cpu().tolist())
 
@@ -466,6 +500,7 @@ loss_fn = nn.CrossEntropyLoss()
 X_t = torch.tensor(X_attack_dp, dtype=torch.float32).to(device)
 y_t = torch.tensor(y_attack_dp, dtype=torch.long).to(device)
 
+attack_model_dp.train()
 for epoch in range(50):
     logits = attack_model_dp(X_t)
     loss = loss_fn(logits, y_t)
@@ -487,12 +522,14 @@ nonmember_scores_dp = []
 
 with torch.no_grad():
     for batch in eval_loader_A2:
-        outputs = model_dp(**{k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask"]})
+        inputs = {k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask"]}
+        outputs = model_dp(**inputs)
         probs = torch.softmax(outputs.logits, dim=1)
         member_scores_dp.extend(probs.cpu().tolist())
     
     for batch in eval_loader_B3:
-        outputs = model_dp(**{k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask"]})
+        inputs = {k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask"]}
+        outputs = model_dp(**inputs)
         probs = torch.softmax(outputs.logits, dim=1)
         nonmember_scores_dp.extend(probs.cpu().tolist())
 
@@ -537,9 +574,9 @@ print(f"\n[DP 타겟]     epsilon(): {final_epsilon:.2f}, delta={delta} (설정�
 print("\n" + "="*60)
 print("분석 결론:")
 print("="*60)
-if auc_score_dp < auc_score_no_dp:
-    improvement = ((auc_score_no_dp - auc_score_dp) / auc_score_no_dp) * 100
-    print(f"✓ DP-SGD 적용으로 MIA AUC가 {improvement:.1f}% 감소하여 프라이버시가 향상됨")
+if simple_auc_dp < simple_auc_no_dp:
+    improvement = ((simple_auc_no_dp - simple_auc_dp) / simple_auc_no_dp) * 100
+    print(f"✓ DP-SGD 적용으로 SimpleConf MIA AUC가 {improvement:.1f}% 감소하여 프라이버시가 향상됨")
 else:
     print("✗ DP-SGD 적용 후에도 MIA AUC가 감소하지 않음 (하이퍼파라미터 조정 필요)")
 
@@ -550,4 +587,3 @@ else:
     print("! 모델 정확도는 유지 또는 향상됨")
 
 print("\n실험 완료!")
-
