@@ -358,9 +358,18 @@ model_dp = DistilBertForSequenceClassification.from_pretrained(
 # Opacus 호환성을 위해 모델 수정
 model_dp = ModuleValidator.fix(model_dp)
 model_dp.to(device)
-model_dp.train()  # 중요!
 
-optimizer_dp = optim.AdamW(model_dp.parameters(), lr=2e-5)
+# 중요: DistilBERT backbone freeze, classifier만 학습 (Opacus 호환)
+for param in model_dp.distilbert.parameters():
+    param.requires_grad = False
+
+model_dp.train()
+
+# classifier 파라미터만 학습
+optimizer_dp = optim.AdamW(
+    [p for p in model_dp.parameters() if p.requires_grad], 
+    lr=1e-3  # classifier는 더 높은 lr 사용
+)
 
 # DP 설정
 noise_multiplier = 1.0
@@ -449,9 +458,18 @@ shadow_model_dp = DistilBertForSequenceClassification.from_pretrained(
 
 shadow_model_dp = ModuleValidator.fix(shadow_model_dp)
 shadow_model_dp.to(device)
+
+# 중요: DistilBERT backbone freeze, classifier만 학습 (Opacus 호환)
+for param in shadow_model_dp.distilbert.parameters():
+    param.requires_grad = False
+
 shadow_model_dp.train()
 
-shadow_optimizer_dp = optim.AdamW(shadow_model_dp.parameters(), lr=2e-5)
+# classifier 파라미터만 학습
+shadow_optimizer_dp = optim.AdamW(
+    [p for p in shadow_model_dp.parameters() if p.requires_grad], 
+    lr=1e-3
+)
 
 train_loader_B1_dp = DataLoader(dataset_B1, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, drop_last=True)
 
